@@ -43,6 +43,29 @@ class TestGetDtypeBytes:
         assert get_dtype_bytes(dtype) == expected
 
 
+# ---- _local_shape_from_global_index ----
+
+
+class TestLocalShapeFromGlobalIndex:
+    """Tests for deriving local buffer shapes from JAX's global shard indices."""
+
+    @pytest.mark.parametrize(
+        "shape, global_index, expected",
+        [
+            ((64, 8), (slice(16, 32), slice(None)), (16, 8)),
+            ((3, 64, 8), (slice(None), slice(48, 64), slice(None)), (3, 16, 8)),
+            ((10,), (slice(1, 9, 2),), (4,)),
+        ],
+    )
+    def test_derives_shape_from_slices(self, shape, global_index, expected):
+        assert sharding_module._local_shape_from_global_index(shape, global_index) == expected
+
+    @pytest.mark.parametrize("global_index", [None, (slice(None),), (0, slice(None))])
+    def test_rejects_invalid_indices(self, global_index):
+        with pytest.raises(ValueError, match=r"Invalid shard index|Expected a slice"):
+            sharding_module._local_shape_from_global_index((4, 6), global_index)
+
+
 # ---- pretty_print_sharding ----
 
 
@@ -174,6 +197,39 @@ class TestCreateNamedShardedMatrix:
                     dtype=jnp.float32,
                     backend="cpu",
                 )
+
+    def test_constructs_only_addressable_device_arrays(self):
+        cpu = CPU_DEVICES[0]
+        global_devices = [cpu] * 4
+        shape = (8, 6)
+        fake_sharding = MagicMock()
+        fake_sharding.addressable_devices_indices_map.return_value = {
+            cpu: (slice(4, 6), slice(None)),
+        }
+        expected = object()
+
+        with (
+            mock.patch.object(jax, "devices", return_value=global_devices),
+            mock.patch(
+                "fdtdx.core.jax.sharding.get_named_sharding_from_shape",
+                return_value=fake_sharding,
+            ),
+            mock.patch.object(jax, "make_array_from_single_device_arrays", return_value=expected) as make_array,
+        ):
+            result = create_named_sharded_matrix(
+                shape=shape,
+                value=2.0,
+                sharding_axis=0,
+                dtype=jnp.float32,
+                backend="cpu",
+            )
+
+        assert result is expected
+        fake_sharding.addressable_devices_indices_map.assert_called_once_with(shape)
+        matrices = make_array.call_args.args[2]
+        assert len(matrices) == len(fake_sharding.addressable_devices_indices_map.return_value)
+        assert matrices[0].shape == (2, 6)
+        assert jnp.allclose(matrices[0], 2.0)
 
     def test_counter_increments(self):
         old_counter = sharding_module.counter

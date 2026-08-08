@@ -45,6 +45,26 @@ def get_dtype_bytes(dtype: jnp.dtype) -> int:
     return jnp.dtype(dtype).itemsize
 
 
+def _local_shape_from_global_index(
+    shape: tuple[int, ...],
+    global_index: tuple[Any, ...] | None,
+) -> tuple[int, ...]:
+    """Derive a process-local shard shape from its global array index."""
+    if global_index is None or len(global_index) != len(shape):
+        raise ValueError(f"Invalid shard index {global_index!r} for global shape {shape}")
+
+    local_shape = []
+    for axis, (axis_size, axis_index) in enumerate(zip(shape, global_index, strict=True)):
+        if not isinstance(axis_index, slice):
+            raise ValueError(
+                f"Expected a slice for shard axis {axis}, got {axis_index!r} in global index {global_index!r}"
+            )
+        start, stop, step = axis_index.indices(axis_size)
+        local_shape.append(len(range(start, stop, step)))
+
+    return tuple(local_shape)
+
+
 def pretty_print_sharding(sharding: jax.sharding.Sharding) -> str:
     if isinstance(sharding, jax.sharding.NamedSharding):
         return f"NamedSharding({sharding.mesh.devices}, {sharding.spec})"
@@ -104,10 +124,17 @@ def create_named_sharded_matrix(
     def value_fn(arr, val):
         return arr * val
 
+    addressable_map = named_sharding.addressable_devices_indices_map(shape)
     matrices = []
-    for device in compute_devices[::-1]:
+    for device, global_index in addressable_map.items():
+        local_shape = _local_shape_from_global_index(shape, global_index)
+        if local_shape != per_device_shape:
+            raise ValueError(
+                "Mapped local shard shape does not match the expected evenly divided shape, "
+                f"got {local_shape=} and {per_device_shape=} for {device=} and {global_index=}"
+            )
         device_matrix = jnp.ones(
-            per_device_shape,
+            local_shape,
             dtype=dtype,
             device=device,
         )
