@@ -130,6 +130,24 @@ def test_custom_mode_source_can_apply_explicit_fdtdx_normalization() -> None:
     assert power == pytest.approx(1.0)
 
 
+def test_custom_mode_source_stops_callback_field_gradients() -> None:
+    config = _config()
+    electric, magnetic = _fields()
+
+    def callback(*, inv_permittivity, **_):
+        gain = jnp.mean(inv_permittivity)
+        return electric * gain, magnetic * gain
+
+    source = _place(_source(callback), config)
+
+    def objective(scale):
+        inverse_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float64) * scale
+        applied = source.apply(jax.random.PRNGKey(61), inverse_permittivity, 1.0)
+        return jnp.real(jnp.sum(applied._E) + jnp.sum(applied._H))
+
+    assert jax.grad(objective)(jnp.asarray(0.75, dtype=jnp.float64)) == pytest.approx(0.0)
+
+
 @pytest.mark.parametrize(
     ("effective_index", "message"),
     [

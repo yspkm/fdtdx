@@ -240,8 +240,8 @@ class CustomModePlaneSource(TFSFPlaneSource):
             inv_permittivity=mode_inv_permittivity,
             inv_permeability=inv_permeability_slice,
         )
-        mode_E = jnp.asarray(mode_E)
-        mode_H = jnp.asarray(mode_H)
+        mode_E = jax.lax.stop_gradient(jnp.asarray(mode_E))
+        mode_H = jax.lax.stop_gradient(jnp.asarray(mode_H))
         self._validate_field(mode_E, label="electric field")
         self._validate_field(mode_H, label="magnetic field")
         if mode_E.dtype != mode_H.dtype:
