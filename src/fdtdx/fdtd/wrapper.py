@@ -41,6 +41,11 @@ def run_fdtd(
             progress_callback=progress_callback,
         )
     if config.gradient_config.method == "reversible":
+        if any(getattr(source, "allow_profile_updates", False) for source in objects.sources):
+            raise NotImplementedError(
+                "reversible FDTD does not expose source-object cotangents for dynamic mode "
+                "profiles; use GradientConfig(method='checkpointed')"
+            )
         return reversible_fdtd(
             arrays=arrays,
             objects=objects,

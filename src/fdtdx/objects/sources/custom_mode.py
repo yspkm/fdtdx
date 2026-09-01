@@ -44,8 +44,10 @@ class CustomModePlaneSource(TFSFPlaneSource):
     default normalizes by FDTDX's integrated-flux convention.
 
     The callback is a setup boundary. FDTDX deliberately stops gradients through
-    source setup, so design derivatives must enter through the FDTD material and
-    time-stepping arrays rather than through the imported mode profile.
+    source setup. Callers that explicitly set ``allow_profile_updates=True`` may
+    subsequently use :meth:`with_mode_profile` to bind JAX-valued E/H and effective
+    index arrays to an already applied source. This opt-in path preserves gradients
+    through the source profile without changing placement or source-plane materials.
     """
 
     #: Callable returning external ``(E, eta0_H)`` fields on the placed plane.
@@ -59,6 +61,9 @@ class CustomModePlaneSource(TFSFPlaneSource):
 
     #: Permit overlap with a parameterized Device despite the static source-mode VJP.
     allow_device_overlap: bool = frozen_field(default=False)
+
+    #: Permit explicit differentiable profile rebinding after placement and initial apply.
+    allow_profile_updates: bool = frozen_field(default=False)
 
     _inv_permittivity: jax.Array = private_field()
     _inv_permeability: jax.Array | float = private_field()
@@ -168,6 +173,104 @@ class CustomModePlaneSource(TFSFPlaneSource):
                 f"custom mode {label} dtype {field.dtype} is incompatible with simulation dtype {expected_real_dtype}"
             )
 
+    def _bind_mode_profile(
+        self: Self,
+        mode_E: jax.Array,
+        mode_H: jax.Array,
+        effective_index: jax.Array,
+    ) -> Self:
+        """Bind validated runtime fields and rebuild their effective-index time offsets."""
+
+        self._validate_field(mode_E, label="electric field")
+        self._validate_field(mode_H, label="magnetic field")
+        if mode_E.dtype != mode_H.dtype:
+            raise ValueError("custom mode electric and magnetic fields must have the same dtype")
+        if effective_index.shape != ():
+            raise ValueError("custom mode effective index must be a scalar")
+        expected_neff_dtype = jnp.complex128 if self._config.dtype == jnp.float64 else jnp.complex64
+        if effective_index.dtype != jnp.dtype(expected_neff_dtype):
+            raise ValueError(
+                "custom mode effective-index dtype "
+                f"{effective_index.dtype} is incompatible with simulation dtype {self._config.dtype}"
+            )
+        if self.normalize:
+            mode_E, mode_H = normalize_by_poynting_flux(
+                mode_E,
+                mode_H,
+                axis=self.propagation_axis,
+                area_weights=self._normalization_area_weights(),
+            )
+
+        self = self.aset("_E", mode_E, create_new_ok=True)
+        self = self.aset("_H", mode_H, create_new_ok=True)
+        self = self.aset("_neff", effective_index, create_new_ok=True)
+
+        center = jnp.asarray(
+            [round(self.grid_shape[self.horizontal_axis]), round(self.grid_shape[self.vertical_axis])],
+            dtype=jnp.int32,
+        )
+        raw_wave_vector = get_wave_vector_raw(
+            direction=self.direction,
+            propagation_axis=self.propagation_axis,
+            dtype=self._config.dtype,
+        )
+        time_offset_E, time_offset_H = calculate_time_offset_yee(
+            center=center,
+            wave_vector=raw_wave_vector,
+            inv_permittivities=self._inv_permittivity,
+            inv_permeabilities=jnp.ones_like(self._inv_permeability),
+            resolution=self._source_resolution(),
+            time_step_duration=self._config.time_step_duration,
+            effective_index=jnp.real(effective_index),
+            coordinate_edges=self._local_edge_coordinates(),
+            center_physical=self._source_center_physical(),
+        )
+        self = self.aset("_time_offset_E", time_offset_E, create_new_ok=True)
+        return self.aset("_time_offset_H", time_offset_H, create_new_ok=True)
+
+    def with_mode_profile(
+        self: Self,
+        *,
+        mode_E: jax.Array,
+        mode_H: jax.Array,
+        effective_index: jax.Array,
+    ) -> Self:
+        """Return an applied source with an explicitly differentiable mode profile.
+
+        Placement, carrier frequency, source-plane medium, and temporal profile remain
+        unchanged. Invalid dynamic values become non-finite rather than being clipped.
+        The checkpointed FDTD reverse path may differentiate these runtime source leaves;
+        the reversible custom VJP does not yet expose source-object cotangents.
+        """
+
+        if not self.allow_profile_updates:
+            raise ValueError("custom mode source was not configured for profile updates")
+        if self._inv_permittivity is None or self._inv_permeability is None:
+            raise ValueError("custom mode source must be applied before updating its profile")
+        electric = jnp.asarray(mode_E)
+        magnetic = jnp.asarray(mode_H)
+        neff_dtype = jnp.complex128 if self._config.dtype == jnp.float64 else jnp.complex64
+        neff = jnp.asarray(effective_index, dtype=neff_dtype)
+        self._validate_field(electric, label="electric field")
+        self._validate_field(magnetic, label="magnetic field")
+        if electric.dtype != magnetic.dtype:
+            raise ValueError("custom mode electric and magnetic fields must have the same dtype")
+        if neff.shape != ():
+            raise ValueError("custom mode effective index must be a scalar")
+        valid = (
+            jnp.all(jnp.isfinite(electric))
+            & jnp.all(jnp.isfinite(magnetic))
+            & jnp.isfinite(jnp.real(neff))
+            & jnp.isfinite(jnp.imag(neff))
+            & (jnp.real(neff) > 0.0)
+        )
+        invalid_field = jnp.asarray(jnp.nan, dtype=electric.dtype)
+        invalid_neff = jnp.asarray(jnp.nan + 1j * jnp.nan, dtype=neff.dtype)
+        electric = jnp.where(valid, electric, invalid_field)
+        magnetic = jnp.where(valid, magnetic, invalid_field)
+        neff = jnp.where(valid, neff, invalid_neff)
+        return self._bind_mode_profile(electric, magnetic, neff)
+
     def apply(
         self: Self,
         key: jax.Array,
@@ -242,48 +345,11 @@ class CustomModePlaneSource(TFSFPlaneSource):
         )
         mode_E = jax.lax.stop_gradient(jnp.asarray(mode_E))
         mode_H = jax.lax.stop_gradient(jnp.asarray(mode_H))
-        self._validate_field(mode_E, label="electric field")
-        self._validate_field(mode_H, label="magnetic field")
-        if mode_E.dtype != mode_H.dtype:
-            raise ValueError("custom mode electric and magnetic fields must have the same dtype")
-        if self.normalize:
-            mode_E, mode_H = normalize_by_poynting_flux(
-                mode_E,
-                mode_H,
-                axis=self.propagation_axis,
-                area_weights=self._normalization_area_weights(),
-            )
-
         neff_dtype = jnp.complex128 if self._config.dtype == jnp.float64 else jnp.complex64
         neff = jnp.asarray(self.effective_index, dtype=neff_dtype)
-        self = self.aset("_E", mode_E, create_new_ok=True)
-        self = self.aset("_H", mode_H, create_new_ok=True)
-        self = self.aset("_neff", neff, create_new_ok=True)
         self = self.aset("_inv_permittivity", inv_permittivity_slice, create_new_ok=True)
         self = self.aset("_inv_permeability", inv_permeability_slice, create_new_ok=True)
-
-        center = jnp.asarray(
-            [round(self.grid_shape[self.horizontal_axis]), round(self.grid_shape[self.vertical_axis])],
-            dtype=jnp.int32,
-        )
-        raw_wave_vector = get_wave_vector_raw(
-            direction=self.direction,
-            propagation_axis=self.propagation_axis,
-            dtype=self._config.dtype,
-        )
-        time_offset_E, time_offset_H = calculate_time_offset_yee(
-            center=center,
-            wave_vector=raw_wave_vector,
-            inv_permittivities=inv_permittivity_slice,
-            inv_permeabilities=jnp.ones_like(inv_permeability_slice),
-            resolution=self._source_resolution(),
-            time_step_duration=self._config.time_step_duration,
-            effective_index=jnp.real(neff),
-            coordinate_edges=self._local_edge_coordinates(),
-            center_physical=self._source_center_physical(),
-        )
-        self = self.aset("_time_offset_E", time_offset_E, create_new_ok=True)
-        self = self.aset("_time_offset_H", time_offset_H, create_new_ok=True)
+        self = self._bind_mode_profile(mode_E, mode_H, neff)
 
         if c1_slice is not None and c2_slice is not None and c3_slice is not None:
             filtered = _build_dispersive_H_filter(

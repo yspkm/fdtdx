@@ -206,6 +206,7 @@ def _tfsf_inject_E_face(
     temporal_profile: TemporalProfile,
     wave_character,
     static_amplitude_factor: float,
+    differentiate_incident_field: bool = False,
 ) -> jax.Array:
     """Inject the incident-H TFSF correction into E on a single face.
 
@@ -235,6 +236,10 @@ def _tfsf_inject_E_face(
         temporal_profile: Source temporal profile.
         wave_character: Source carrier WaveCharacter.
         static_amplitude_factor: Static amplitude multiplier.
+        differentiate_incident_field: Preserve derivatives through ``incident_H``
+            and its Yee time offsets. The source-plane material multiplier remains
+            outside this derivative so a dynamic profile does not introduce an
+            implicit material-to-mode sensitivity.
 
     Returns:
         The E array with the face correction added.
@@ -283,8 +288,13 @@ def _tfsf_inject_E_face(
         return incident_H[axis] * amplitude_H[axis]
 
     if is_fully_anisotropic:
-        H_b_inc = jax.lax.stop_gradient(incident_H_component(b_axis))
-        H_a_inc = jax.lax.stop_gradient(incident_H_component(a_axis))
+        H_b_inc = incident_H_component(b_axis)
+        H_a_inc = incident_H_component(a_axis)
+        if differentiate_incident_field:
+            inv_permittivity_slice = jax.lax.stop_gradient(inv_permittivity_slice)
+        else:
+            H_b_inc = jax.lax.stop_gradient(H_b_inc)
+            H_a_inc = jax.lax.stop_gradient(H_a_inc)
 
         def get_inv_eps(row, col):
             return inv_permittivity_slice[row * 3 + col]
@@ -296,12 +306,29 @@ def _tfsf_inject_E_face(
 
     else:
         H_b_inc = incident_H_component(b_axis)
-        H_b_inc = H_b_inc * c * inv_permittivity_slice[a_axis]
-        H_b_inc = jax.lax.stop_gradient(H_b_inc)
+        H_b_inc = (
+            H_b_inc
+            * c
+            * (
+                jax.lax.stop_gradient(inv_permittivity_slice[a_axis])
+                if differentiate_incident_field
+                else inv_permittivity_slice[a_axis]
+            )
+        )
 
         H_a_inc = incident_H_component(a_axis)
-        H_a_inc = H_a_inc * c * inv_permittivity_slice[b_axis]
-        H_a_inc = jax.lax.stop_gradient(H_a_inc)
+        H_a_inc = (
+            H_a_inc
+            * c
+            * (
+                jax.lax.stop_gradient(inv_permittivity_slice[b_axis])
+                if differentiate_incident_field
+                else inv_permittivity_slice[b_axis]
+            )
+        )
+        if not differentiate_incident_field:
+            H_b_inc = jax.lax.stop_gradient(H_b_inc)
+            H_a_inc = jax.lax.stop_gradient(H_a_inc)
 
         E = E.at[a_axis, *grid_slice].add(sign * H_b_inc)
         E = E.at[b_axis, *grid_slice].add(-sign * H_a_inc)
@@ -323,6 +350,7 @@ def _tfsf_inject_H_face(
     temporal_profile: TemporalProfile,
     wave_character,
     static_amplitude_factor: float,
+    differentiate_incident_field: bool = False,
 ) -> jax.Array:
     """Inject the incident-E TFSF correction into H on a single face.
 
@@ -330,7 +358,9 @@ def _tfsf_inject_H_face(
     components are driven by the incident E of the other tangential axis
     (``g_E[a]=-E_b``, ``g_E[b]=+E_a``). See that function for the parameter
     conventions; ``time_offset_E``/``incident_E`` replace their H analogues and
-    ``c`` uses the forward metric stencil.
+    ``c`` uses the forward metric stencil. ``differentiate_incident_field``
+    preserves only the incident-profile and time-offset derivative; it does not
+    add a material-to-source-mode derivative.
 
     Returns:
         The H array with the face correction added.
@@ -378,8 +408,13 @@ def _tfsf_inject_H_face(
         return incident_E[axis] * amplitude_E[axis]
 
     if is_fully_anisotropic:
-        E_a_inc = jax.lax.stop_gradient(incident_E_component(a_axis))
-        E_b_inc = jax.lax.stop_gradient(incident_E_component(b_axis))
+        E_a_inc = incident_E_component(a_axis)
+        E_b_inc = incident_E_component(b_axis)
+        if differentiate_incident_field:
+            inv_permeability_slice = jax.lax.stop_gradient(inv_permeability_slice)
+        else:
+            E_a_inc = jax.lax.stop_gradient(E_a_inc)
+            E_b_inc = jax.lax.stop_gradient(E_b_inc)
 
         def get_inv_mu(row, col):
             return inv_permeability_slice[row * 3 + col]  # type: ignore
@@ -391,18 +426,22 @@ def _tfsf_inject_H_face(
 
     else:
         E_a_inc = incident_E_component(a_axis)
-        if isinstance(inv_permeability_slice, jax.Array) and inv_permeability_slice.ndim > 1:
-            E_a_inc = E_a_inc * c * inv_permeability_slice[b_axis]
+        dynamic_inv_permeability_slice = (
+            jax.lax.stop_gradient(inv_permeability_slice) if differentiate_incident_field else inv_permeability_slice
+        )
+        if isinstance(dynamic_inv_permeability_slice, jax.Array) and dynamic_inv_permeability_slice.ndim > 1:
+            E_a_inc = E_a_inc * c * dynamic_inv_permeability_slice[b_axis]
         else:
-            E_a_inc = E_a_inc * c * inv_permeability_slice
-        E_a_inc = jax.lax.stop_gradient(E_a_inc)
+            E_a_inc = E_a_inc * c * dynamic_inv_permeability_slice
 
         E_b_inc = incident_E_component(b_axis)
-        if isinstance(inv_permeability_slice, jax.Array) and inv_permeability_slice.ndim > 1:
-            E_b_inc = E_b_inc * c * inv_permeability_slice[a_axis]
+        if isinstance(dynamic_inv_permeability_slice, jax.Array) and dynamic_inv_permeability_slice.ndim > 1:
+            E_b_inc = E_b_inc * c * dynamic_inv_permeability_slice[a_axis]
         else:
-            E_b_inc = E_b_inc * c * inv_permeability_slice
-        E_b_inc = jax.lax.stop_gradient(E_b_inc)
+            E_b_inc = E_b_inc * c * dynamic_inv_permeability_slice
+        if not differentiate_incident_field:
+            E_a_inc = jax.lax.stop_gradient(E_a_inc)
+            E_b_inc = jax.lax.stop_gradient(E_b_inc)
 
         H = H.at[b_axis, *grid_slice].add(sign * E_a_inc)
         H = H.at[a_axis, *grid_slice].add(-sign * E_b_inc)
@@ -769,6 +808,7 @@ class TFSFPlaneSource(DirectionalPlaneSourceBase, ABC):
             temporal_profile=self.temporal_profile,
             wave_character=self.wave_character,
             static_amplitude_factor=self.static_amplitude_factor,
+            differentiate_incident_field=bool(getattr(self, "allow_profile_updates", False)),
         )
 
     def update_H(
@@ -803,4 +843,5 @@ class TFSFPlaneSource(DirectionalPlaneSourceBase, ABC):
             temporal_profile=self.temporal_profile,
             wave_character=self.wave_character,
             static_amplitude_factor=self.static_amplitude_factor,
+            differentiate_incident_field=bool(getattr(self, "allow_profile_updates", False)),
         )

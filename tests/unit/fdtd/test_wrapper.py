@@ -17,6 +17,7 @@ class TestRunFdtd:
     def setup(self):
         mock_arrays = Mock(spec=ArrayContainer)
         mock_objects = Mock(spec=ObjectContainer)
+        mock_objects.sources = []
         mock_config = Mock(spec=SimulationConfig)
         mock_config.gradient_config = None
         key = jax.random.PRNGKey(0)
@@ -61,6 +62,15 @@ class TestRunFdtd:
             progress_callback=None,
         )
         assert result is mock_result
+
+    def test_reversible_gradient_rejects_dynamic_mode_profile(self, setup):
+        arrays, objects, config, key = setup
+        config.gradient_config = Mock()
+        config.gradient_config.method = "reversible"
+        objects.sources = [Mock(allow_profile_updates=True)]
+
+        with pytest.raises(NotImplementedError, match=r"use GradientConfig.*checkpointed"):
+            run_fdtd(arrays, objects, config, key)
 
     def test_checkpointed_gradient_method_uses_checkpointed(self, setup):
         """gradient_config.method='checkpointed' delegates to checkpointed_fdtd."""
