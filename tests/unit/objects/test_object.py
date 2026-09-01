@@ -601,14 +601,28 @@ class TestCheckOverlap:
         placed_b = _place(b, config, key, ((10, 15), (10, 15), (10, 15)))
         assert not placed_a.check_overlap(placed_b)
 
-    def test_touching_objects_reported_as_overlapping(self, config, key):
+    def test_touching_half_open_slices_do_not_overlap(self, config, key):
         a = _make(name="a")
         b = _make(name="b")
         placed_a = _place(a, config, key, ((0, 5), (0, 5), (0, 5)))
-        # b starts at 5, which equals s_end of a - boundary condition
         placed_b = _place(b, config, key, ((5, 10), (0, 5), (0, 5)))
-        # 5 <= 5 <= 10: True for axis 0 → reports overlap
-        assert placed_a.check_overlap(placed_b)
+        assert not placed_a.check_overlap(placed_b)
+
+    def test_overlap_requires_intersection_on_every_axis(self, config, key):
+        a = _make(name="a")
+        b = _make(name="b")
+        placed_a = _place(a, config, key, ((0, 10), (0, 10), (0, 5)))
+        placed_b = _place(b, config, key, ((2, 8), (2, 8), (6, 9)))
+        assert not placed_a.check_overlap(placed_b)
+        assert not placed_b.check_overlap(placed_a)
+
+    def test_containment_is_symmetric_overlap(self, config, key):
+        outer = _make(name="outer")
+        inner = _make(name="inner")
+        placed_outer = _place(outer, config, key, ((0, 20), (0, 20), (0, 20)))
+        placed_inner = _place(inner, config, key, ((5, 10), (6, 11), (7, 12)))
+        assert placed_outer.check_overlap(placed_inner)
+        assert placed_inner.check_overlap(placed_outer)
 
 
 # ---------------------------------------------------------------------------

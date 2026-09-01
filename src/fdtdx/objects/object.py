@@ -893,14 +893,16 @@ class SimulationObject(TreeClass, ABC):
         self,
         other: "SimulationObject",
     ) -> bool:
-        for axis in range(3):
-            s_start, s_end = self._grid_slice_tuple[axis]
-            o_start, o_end = other._grid_slice_tuple[axis]
-            if o_start <= s_start <= o_end:
-                return True
-            if o_start <= s_end <= o_end:
-                return True
-        return False
+        """Return whether two half-open three-dimensional grid slices intersect."""
+
+        return all(
+            max(self_start, other_start) < min(self_end, other_end)
+            for (self_start, self_end), (other_start, other_end) in zip(
+                self._grid_slice_tuple,
+                other._grid_slice_tuple,
+                strict=True,
+            )
+        )
 
     def __eq__(
         self: Self,
