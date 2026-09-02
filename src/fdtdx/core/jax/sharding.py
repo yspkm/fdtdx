@@ -85,8 +85,16 @@ def _sharding_preserving_indexed_update(
     values: Any,
     *,
     operation: str,
+    destination_sharding: jax.sharding.Sharding | None = None,
 ) -> jax.Array:
-    """Apply an indexed update without losing the destination sharding."""
+    """Apply an indexed update without losing the destination sharding.
+
+    ``array`` can be a tracer after an earlier indexed update in the same
+    differentiated or outer-jitted function.  A tracer does not expose the
+    concrete device assignment needed by ``out_shardings``.  Callers that may
+    perform repeated traced updates must therefore capture the original array
+    sharding before tracing and pass it explicitly.
+    """
     if operation == "set":
 
         def update(destination, update_values):
@@ -100,35 +108,74 @@ def _sharding_preserving_indexed_update(
     else:
         raise ValueError(f"Unsupported indexed update operation: {operation}")
 
+    if destination_sharding is None:
+        try:
+            destination_sharding = array.sharding
+            destination_device_count = len(array.devices())
+        except AttributeError as exc:
+            raise ValueError(
+                "destination_sharding is required when the destination array "
+                "is traced; capture it from the concrete array before tracing"
+            ) from exc
+    else:
+        try:
+            destination_device_count = len(destination_sharding.device_set)
+        except (AttributeError, NotImplementedError) as exc:
+            raise ValueError("destination_sharding must have a concrete device assignment") from exc
+
     # A fully addressable array may still span multiple devices. In that case,
     # an unconstrained indexed update can silently return a replicated result.
     # Only single-device arrays are safe to update without an output-sharding
     # contract.
-    if len(array.devices()) == 1:
+    if destination_device_count == 1:
         return update(array, values)
 
     sharded_update = jax.jit(
         update,
-        out_shardings=array.sharding,
+        out_shardings=destination_sharding,
         donate_argnums=(0,),
     )
     return cast(Any, sharded_update)(array, values)
 
 
-def sharding_preserving_set(array: jax.Array, index: Any, values: Any) -> jax.Array:
+def sharding_preserving_set(
+    array: jax.Array,
+    index: Any,
+    values: Any,
+    *,
+    destination_sharding: jax.sharding.Sharding | None = None,
+) -> jax.Array:
     """Set indexed values while preserving the destination sharding.
 
     Multi-device input buffers may be donated and must not be reused.
     """
-    return _sharding_preserving_indexed_update(array, index, values, operation="set")
+    return _sharding_preserving_indexed_update(
+        array,
+        index,
+        values,
+        operation="set",
+        destination_sharding=destination_sharding,
+    )
 
 
-def sharding_preserving_add(array: jax.Array, index: Any, values: Any) -> jax.Array:
+def sharding_preserving_add(
+    array: jax.Array,
+    index: Any,
+    values: Any,
+    *,
+    destination_sharding: jax.sharding.Sharding | None = None,
+) -> jax.Array:
     """Add indexed values while preserving the destination sharding.
 
     Multi-device input buffers may be donated and must not be reused.
     """
-    return _sharding_preserving_indexed_update(array, index, values, operation="add")
+    return _sharding_preserving_indexed_update(
+        array,
+        index,
+        values,
+        operation="add",
+        destination_sharding=destination_sharding,
+    )
 
 
 def create_named_sharded_matrix(

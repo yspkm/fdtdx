@@ -1,5 +1,6 @@
 import math
 import warnings
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 import jax
@@ -42,6 +43,60 @@ from fdtdx.objects.object import (
 from fdtdx.objects.static_material.static import SimulationVolume, StaticMultiMaterialObject, UniformMaterialObject
 
 DEFAULT_MAX_ITER = 1000
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialArrayShardings:
+    """Concrete destination shardings for arrays mutated by ``apply_params``.
+
+    Capture this host-side contract before tracing when ``arrays`` itself will
+    be an explicit argument of an outer ``jax.jit``.  It prevents a repeated
+    indexed update from inferring layout from an intermediate tracer.
+    """
+
+    inv_permittivities: jax.sharding.Sharding
+    dispersive_c1: jax.sharding.Sharding | None
+    dispersive_c2: jax.sharding.Sharding | None
+    dispersive_c3: jax.sharding.Sharding | None
+    dispersive_c4: jax.sharding.Sharding | None
+
+
+def capture_material_array_shardings(arrays: ArrayContainer) -> MaterialArrayShardings:
+    """Capture concrete material-array layouts before JAX tracing begins."""
+
+    def required(name: str) -> jax.sharding.Sharding:
+        value = getattr(arrays, name)
+        if not isinstance(value, jax.Array):
+            raise TypeError(
+                f"cannot capture {name} sharding from a traced or non-array value; "
+                "capture material shardings before tracing"
+            )
+        return value.sharding
+
+    def optional(name: str) -> jax.sharding.Sharding | None:
+        value = getattr(arrays, name)
+        if value is None:
+            return None
+        return required(name)
+
+    return MaterialArrayShardings(
+        inv_permittivities=required("inv_permittivities"),
+        dispersive_c1=optional("dispersive_c1"),
+        dispersive_c2=optional("dispersive_c2"),
+        dispersive_c3=optional("dispersive_c3"),
+        dispersive_c4=optional("dispersive_c4"),
+    )
+
+
+def _validate_material_array_shardings(
+    arrays: ArrayContainer,
+    shardings: MaterialArrayShardings,
+) -> None:
+    """Require the static sharding contract to match optional array presence."""
+
+    for name in ("dispersive_c1", "dispersive_c2", "dispersive_c3", "dispersive_c4"):
+        if (getattr(arrays, name) is None) != (getattr(shardings, name) is None):
+            raise ValueError(f"material sharding contract does not match {name} presence")
 
 
 def _warn_if_simulation_volume_too_large(grid_shape: tuple[int, int, int]) -> None:
@@ -319,6 +374,8 @@ def apply_params(
     objects: ObjectContainer,
     params: ParameterContainer,
     key: jax.Array | None = None,
+    *,
+    material_array_shardings: MaterialArrayShardings | None = None,
     **transform_kwargs,
 ) -> tuple[ArrayContainer, ObjectContainer, dict[str, Any]]:
     """Applies parameters to devices and updates source states.
@@ -329,6 +386,9 @@ def apply_params(
         params (ParameterContainer): Container with device parameters
         key (jax.Array | None): JAX random key for source updates.  When ``None``
             (the default) a deterministic key is derived from ``_DEFAULT_KEY_SEED``.
+        material_array_shardings (MaterialArrayShardings | None): Concrete
+            destination layouts captured before tracing. Required when ``arrays``
+            is an explicit argument of an outer JIT; inferred for eager arrays.
         **transform_kwargs: Keyword arguments passed to the parameter transformation.
     Returns:
         tuple[ArrayContainer, ObjectContainer, dict[str, Any]]: A tuple containing:
@@ -338,6 +398,10 @@ def apply_params(
     """
     key = default_key(key)
     info = {}
+    if material_array_shardings is None:
+        material_array_shardings = capture_material_array_shardings(arrays)
+    _validate_material_array_shardings(arrays, material_array_shardings)
+
     # Determine number of components from existing array shape
     num_perm_components = arrays.inv_permittivities.shape[0]
     isotropic = num_perm_components == 1
@@ -464,7 +528,12 @@ def apply_params(
                     new_c4_slice = jnp.moveaxis(allowed_c4_arr[int_idx], (-2, -1), (0, 1))
 
         # Update all components of inv_permittivities array at once
-        new_inv_perm = arrays.inv_permittivities.at[:, *device.grid_slice].set(new_inv_perm_slice)
+        new_inv_perm = sharding_preserving_set(
+            arrays.inv_permittivities,
+            (slice(None), *device.grid_slice),
+            new_inv_perm_slice,
+            destination_sharding=material_array_shardings.inv_permittivities,
+        )
         arrays = arrays.at["inv_permittivities"].set(new_inv_perm)
 
         if write_dispersive:
@@ -473,15 +542,41 @@ def apply_params(
                 and arrays.dispersive_c2 is not None
                 and arrays.dispersive_c3 is not None
             )
-            new_c1 = arrays.dispersive_c1.at[:, :, *device.grid_slice].set(new_c1_slice)
-            new_c2 = arrays.dispersive_c2.at[:, :, *device.grid_slice].set(new_c2_slice)
-            new_c3 = arrays.dispersive_c3.at[:, :, *device.grid_slice].set(new_c3_slice)
+            assert (
+                material_array_shardings.dispersive_c1 is not None
+                and material_array_shardings.dispersive_c2 is not None
+                and material_array_shardings.dispersive_c3 is not None
+            )
+            new_c1 = sharding_preserving_set(
+                arrays.dispersive_c1,
+                (slice(None), slice(None), *device.grid_slice),
+                new_c1_slice,
+                destination_sharding=material_array_shardings.dispersive_c1,
+            )
+            new_c2 = sharding_preserving_set(
+                arrays.dispersive_c2,
+                (slice(None), slice(None), *device.grid_slice),
+                new_c2_slice,
+                destination_sharding=material_array_shardings.dispersive_c2,
+            )
+            new_c3 = sharding_preserving_set(
+                arrays.dispersive_c3,
+                (slice(None), slice(None), *device.grid_slice),
+                new_c3_slice,
+                destination_sharding=material_array_shardings.dispersive_c3,
+            )
             arrays = arrays.at["dispersive_c1"].set(new_c1)
             arrays = arrays.at["dispersive_c2"].set(new_c2)
             arrays = arrays.at["dispersive_c3"].set(new_c3)
             if write_dispersive_c4:
                 assert arrays.dispersive_c4 is not None
-                new_c4 = arrays.dispersive_c4.at[:, :, *device.grid_slice].set(new_c4_slice)
+                assert material_array_shardings.dispersive_c4 is not None
+                new_c4 = sharding_preserving_set(
+                    arrays.dispersive_c4,
+                    (slice(None), slice(None), *device.grid_slice),
+                    new_c4_slice,
+                    destination_sharding=material_array_shardings.dispersive_c4,
+                )
                 arrays = arrays.at["dispersive_c4"].set(new_c4)
 
     # apply random key to sources. Source-side sampling of the dispersion

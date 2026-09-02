@@ -48,7 +48,13 @@ from fdtdx.dispersion import (
 )
 from fdtdx.fdtd.backward import full_backward
 from fdtdx.fdtd.container import ArrayContainer, FieldState, ObjectContainer, ParameterContainer, SimulationState
-from fdtdx.fdtd.initialization import apply_params, place_objects, resolve_object_constraints
+from fdtdx.fdtd.initialization import (
+    MaterialArrayShardings,
+    apply_params,
+    capture_material_array_shardings,
+    place_objects,
+    resolve_object_constraints,
+)
 from fdtdx.fdtd.symmetry import unfold_array, unfold_detector_states, unfold_fields, unfold_source_mode
 from fdtdx.fdtd.wrapper import run_fdtd
 from fdtdx.interfaces.modules import DtypeConversion
@@ -215,6 +221,7 @@ __all__ = [
     "Logger",
     "LorentzPole",
     "Material",
+    "MaterialArrayShardings",
     "ModeOverlapDetector",
     "ModePlaneSource",
     "ObjectContainer",
@@ -268,6 +275,7 @@ __all__ = [
     "boundary_objects_from_config",
     "calculate_sparam",
     "calculate_sparams",
+    "capture_material_array_shardings",
     "circular_brush",
     "compute_energy",
     "compute_eps_spectrum_from_coefficients",

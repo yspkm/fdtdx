@@ -345,6 +345,60 @@ class TestShardingPreservingIndexedUpdate:
         }
         sharded_update.assert_called_once_with(array, 2.0)
 
+    def test_traced_update_requires_pretraced_destination_sharding(self):
+        """Reject layout inference from an intermediate JAX tracer."""
+        tracer = MagicMock(spec=[])
+
+        with pytest.raises(ValueError, match="capture it from the concrete array"):
+            sharding_module._sharding_preserving_indexed_update(
+                tracer,
+                slice(None),
+                2.0,
+                operation="set",
+            )
+
+    def test_explicit_destination_sharding_supports_traced_update(self):
+        """Use a host-captured layout without inspecting the traced destination."""
+        tracer = MagicMock(spec=[])
+        destination_sharding = MagicMock()
+        destination_sharding.device_set = (object(), object())
+        expected = object()
+        sharded_update = MagicMock(return_value=expected)
+
+        with mock.patch.object(jax, "jit", return_value=sharded_update) as jit:
+            result = sharding_module._sharding_preserving_indexed_update(
+                tracer,
+                slice(None),
+                2.0,
+                operation="set",
+                destination_sharding=destination_sharding,
+            )
+
+        assert result is expected
+        jit.assert_called_once()
+        assert jit.call_args.kwargs == {
+            "out_shardings": destination_sharding,
+            "donate_argnums": (0,),
+        }
+        sharded_update.assert_called_once_with(tracer, 2.0)
+
+    def test_rejects_destination_sharding_without_concrete_devices(self):
+        """Fail before compilation when a caller supplies only an abstract mesh."""
+
+        class AbstractSharding:
+            @property
+            def device_set(self):
+                raise NotImplementedError
+
+        with pytest.raises(ValueError, match="concrete device assignment"):
+            sharding_module._sharding_preserving_indexed_update(
+                MagicMock(spec=[]),
+                slice(None),
+                2.0,
+                operation="set",
+                destination_sharding=AbstractSharding(),
+            )
+
     @pytest.mark.parametrize(
         ("update", "initial_value", "update_value", "expected_value"),
         [

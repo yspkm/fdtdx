@@ -10,6 +10,7 @@ from fdtdx.constants import MAX_SIMULATION_VOLUME_CELLS
 from fdtdx.core.grid import RectilinearGrid, UniformGrid
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.fdtd.initialization import (
+    MaterialArrayShardings,
     _apply_grid_coordinate_constraint,
     _apply_position_constraint,
     _apply_real_coordinate_constraint,
@@ -25,6 +26,7 @@ from fdtdx.fdtd.initialization import (
     _update_grid_slices_from_shapes,
     _warn_if_simulation_volume_too_large,
     apply_params,
+    capture_material_array_shardings,
     resolve_object_constraints,
 )
 from fdtdx.materials import Material
@@ -728,6 +730,49 @@ def _make_arrays_mock(shape=(10, 10, 10)):
     at_accessor.__getitem__ = Mock(side_effect=at_getitem)
     arrays.at = at_accessor
     return arrays
+
+
+def test_capture_material_array_shardings_records_optional_layouts() -> None:
+    arrays = _make_arrays_mock(shape=(2, 2, 2))
+
+    shardings = capture_material_array_shardings(arrays)
+
+    assert shardings.inv_permittivities == arrays.inv_permittivities.sharding
+    assert shardings.dispersive_c1 is None
+    assert shardings.dispersive_c2 is None
+    assert shardings.dispersive_c3 is None
+    assert shardings.dispersive_c4 is None
+
+
+def test_capture_material_array_shardings_rejects_traced_value() -> None:
+    arrays = _make_arrays_mock(shape=(2, 2, 2))
+    arrays.inv_permittivities = MagicMock(spec=[])
+
+    with pytest.raises(TypeError, match="capture material shardings before tracing"):
+        capture_material_array_shardings(arrays)
+
+
+def test_apply_params_rejects_optional_material_sharding_mismatch() -> None:
+    arrays = _make_arrays_mock(shape=(2, 2, 2))
+    sharding = arrays.inv_permittivities.sharding
+    shardings = MaterialArrayShardings(
+        inv_permittivities=sharding,
+        dispersive_c1=sharding,
+        dispersive_c2=None,
+        dispersive_c3=None,
+        dispersive_c4=None,
+    )
+    objects = Mock(spec=ObjectContainer)
+    objects.devices = []
+
+    with pytest.raises(ValueError, match="does not match dispersive_c1 presence"):
+        apply_params(
+            arrays,
+            objects,
+            {},
+            jax.random.PRNGKey(0),
+            material_array_shardings=shardings,
+        )
 
 
 @patch("fdtdx.fdtd.initialization.compute_allowed_permittivities")
