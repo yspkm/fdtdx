@@ -140,6 +140,23 @@ def test_traced_apply_params_preserves_material_sharding_and_gradient():
     shardings = capture_material_array_shardings(arrays)
     parameter_shape = (half_x_cells, 2, 4)
 
+    def update_without_contract(inv_permittivities):
+        traced_arrays = arrays.at["inv_permittivities"].set(inv_permittivities)
+        apply_params(
+            traced_arrays,
+            objects,
+            base_params,
+            key=jax.random.PRNGKey(1),
+        )
+        return inv_permittivities
+
+    with pytest.raises(TypeError, match="required for traced multi-device arrays"):
+        jax.jit(
+            update_without_contract,
+            in_shardings=shardings.inv_permittivities,
+            out_shardings=shardings.inv_permittivities,
+        ).lower(arrays.inv_permittivities)
+
     def material_update(inv_permittivities, left_value, right_value):
         traced_arrays = arrays.at["inv_permittivities"].set(inv_permittivities)
         params = dict(base_params)

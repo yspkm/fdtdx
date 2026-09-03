@@ -99,6 +99,50 @@ def _validate_material_array_shardings(
             raise ValueError(f"material sharding contract does not match {name} presence")
 
 
+def _traced_material_arrays_require_explicit_shardings(arrays: ArrayContainer) -> bool:
+    """Return whether an abstract material layout spans multiple devices.
+
+    A tracer cannot expose a concrete device assignment.  ``jax.typeof`` can
+    still tell us whether the surrounding JIT has a multi-device abstract mesh.
+    Such a layout requires a host-captured ``MaterialArrayShardings`` contract;
+    an unsharded or single-device trace can use an ordinary indexed update.
+    """
+
+    typeof = getattr(jax, "typeof", None)
+    if typeof is None:
+        raise TypeError(
+            "cannot inspect traced material-array layout with this JAX version; "
+            "capture material shardings before tracing"
+        )
+    try:
+        abstract_sharding = typeof(arrays.inv_permittivities).sharding
+        num_devices = abstract_sharding.num_devices
+    except (AttributeError, TypeError) as exc:
+        raise TypeError(
+            "cannot inspect traced material-array layout; capture material shardings before tracing"
+        ) from exc
+    return num_devices > 1
+
+
+def _set_material_array(
+    array: jax.Array,
+    index: Any,
+    values: Any,
+    *,
+    destination_sharding: jax.sharding.Sharding | None,
+) -> jax.Array:
+    """Update a material array with an explicit layout when one is required."""
+
+    if destination_sharding is None:
+        return array.at[index].set(values)
+    return sharding_preserving_set(
+        array,
+        index,
+        values,
+        destination_sharding=destination_sharding,
+    )
+
+
 def _warn_if_simulation_volume_too_large(grid_shape: tuple[int, int, int]) -> None:
     num_cells = math.prod(grid_shape)
     if num_cells > constants.MAX_SIMULATION_VOLUME_CELLS:
@@ -387,8 +431,9 @@ def apply_params(
         key (jax.Array | None): JAX random key for source updates.  When ``None``
             (the default) a deterministic key is derived from ``_DEFAULT_KEY_SEED``.
         material_array_shardings (MaterialArrayShardings | None): Concrete
-            destination layouts captured before tracing. Required when ``arrays``
-            is an explicit argument of an outer JIT; inferred for eager arrays.
+            destination layouts captured before tracing. Required when an outer
+            JIT gives ``arrays`` a multi-device layout; inferred for eager arrays
+            and omitted for unsharded or single-device traces.
         **transform_kwargs: Keyword arguments passed to the parameter transformation.
     Returns:
         tuple[ArrayContainer, ObjectContainer, dict[str, Any]]: A tuple containing:
@@ -399,8 +444,16 @@ def apply_params(
     key = default_key(key)
     info = {}
     if material_array_shardings is None:
-        material_array_shardings = capture_material_array_shardings(arrays)
-    _validate_material_array_shardings(arrays, material_array_shardings)
+        try:
+            material_array_shardings = capture_material_array_shardings(arrays)
+        except (AttributeError, TypeError):
+            if _traced_material_arrays_require_explicit_shardings(arrays):
+                raise TypeError(
+                    "material_array_shardings is required for traced multi-device "
+                    "arrays; capture material shardings before tracing"
+                ) from None
+    if material_array_shardings is not None:
+        _validate_material_array_shardings(arrays, material_array_shardings)
 
     # Determine number of components from existing array shape
     num_perm_components = arrays.inv_permittivities.shape[0]
@@ -528,11 +581,13 @@ def apply_params(
                     new_c4_slice = jnp.moveaxis(allowed_c4_arr[int_idx], (-2, -1), (0, 1))
 
         # Update all components of inv_permittivities array at once
-        new_inv_perm = sharding_preserving_set(
+        new_inv_perm = _set_material_array(
             arrays.inv_permittivities,
             (slice(None), *device.grid_slice),
             new_inv_perm_slice,
-            destination_sharding=material_array_shardings.inv_permittivities,
+            destination_sharding=(
+                None if material_array_shardings is None else material_array_shardings.inv_permittivities
+            ),
         )
         arrays = arrays.at["inv_permittivities"].set(new_inv_perm)
 
@@ -542,40 +597,50 @@ def apply_params(
                 and arrays.dispersive_c2 is not None
                 and arrays.dispersive_c3 is not None
             )
-            assert (
-                material_array_shardings.dispersive_c1 is not None
-                and material_array_shardings.dispersive_c2 is not None
-                and material_array_shardings.dispersive_c3 is not None
-            )
-            new_c1 = sharding_preserving_set(
+            if material_array_shardings is not None:
+                assert (
+                    material_array_shardings.dispersive_c1 is not None
+                    and material_array_shardings.dispersive_c2 is not None
+                    and material_array_shardings.dispersive_c3 is not None
+                )
+            new_c1 = _set_material_array(
                 arrays.dispersive_c1,
                 (slice(None), slice(None), *device.grid_slice),
                 new_c1_slice,
-                destination_sharding=material_array_shardings.dispersive_c1,
+                destination_sharding=(
+                    None if material_array_shardings is None else material_array_shardings.dispersive_c1
+                ),
             )
-            new_c2 = sharding_preserving_set(
+            new_c2 = _set_material_array(
                 arrays.dispersive_c2,
                 (slice(None), slice(None), *device.grid_slice),
                 new_c2_slice,
-                destination_sharding=material_array_shardings.dispersive_c2,
+                destination_sharding=(
+                    None if material_array_shardings is None else material_array_shardings.dispersive_c2
+                ),
             )
-            new_c3 = sharding_preserving_set(
+            new_c3 = _set_material_array(
                 arrays.dispersive_c3,
                 (slice(None), slice(None), *device.grid_slice),
                 new_c3_slice,
-                destination_sharding=material_array_shardings.dispersive_c3,
+                destination_sharding=(
+                    None if material_array_shardings is None else material_array_shardings.dispersive_c3
+                ),
             )
             arrays = arrays.at["dispersive_c1"].set(new_c1)
             arrays = arrays.at["dispersive_c2"].set(new_c2)
             arrays = arrays.at["dispersive_c3"].set(new_c3)
             if write_dispersive_c4:
                 assert arrays.dispersive_c4 is not None
-                assert material_array_shardings.dispersive_c4 is not None
-                new_c4 = sharding_preserving_set(
+                if material_array_shardings is not None:
+                    assert material_array_shardings.dispersive_c4 is not None
+                new_c4 = _set_material_array(
                     arrays.dispersive_c4,
                     (slice(None), slice(None), *device.grid_slice),
                     new_c4_slice,
-                    destination_sharding=material_array_shardings.dispersive_c4,
+                    destination_sharding=(
+                        None if material_array_shardings is None else material_array_shardings.dispersive_c4
+                    ),
                 )
                 arrays = arrays.at["dispersive_c4"].set(new_c4)
 
