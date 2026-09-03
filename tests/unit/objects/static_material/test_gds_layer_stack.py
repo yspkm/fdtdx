@@ -929,6 +929,11 @@ class TestGdsLayerStackFromComponent:
         gf = pytest.importorskip("gdsfactory")
         from fdtdx.objects.static_material.gds_layer_stack import gds_layer_stack_from_component
 
+        try:
+            gf.get_active_pdk()
+        except ValueError:
+            gf.gpdk.get_generic_pdk().activate()
+
         c = gf.Component("TEST")
         c.add_polygon(
             [(-0.1, -0.1), (0.1, -0.1), (0.1, 0.1), (-0.1, 0.1)],
