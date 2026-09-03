@@ -35,8 +35,8 @@ def test_custom_mode_source_drives_fdtd_without_an_eigensolver() -> None:
         nonlocal callback_calls
         callback_calls += 1
         source_shape = kwargs["coordinates"][0].shape
-        electric = jnp.zeros((3, *source_shape), dtype=jnp.complex128)
-        magnetic = jnp.zeros((3, *source_shape), dtype=jnp.complex128)
+        electric = jnp.zeros((3, *source_shape), dtype=jnp.complex64)
+        magnetic = jnp.zeros((3, *source_shape), dtype=jnp.complex64)
         electric = electric.at[0].set(1.0 + 0.25j)
         magnetic = magnetic.at[1].set(np.sqrt(relative_permittivity) * (1.0 + 0.25j))
         return electric, magnetic
@@ -60,7 +60,7 @@ def test_custom_mode_source_drives_fdtd_without_an_eigensolver() -> None:
         time=15e-15,
         grid=fdtdx.UniformGrid(spacing=spacing),
         backend="cpu",
-        dtype=jnp.float64,
+        dtype=jnp.float32,
     )
     key = jax.random.PRNGKey(91)
     objects, arrays, parameters, config, _info = fdtdx.place_objects(

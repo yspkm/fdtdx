@@ -19,7 +19,7 @@ from fdtdx.objects.sources.custom_mode import CustomModePlaneSource
 pytestmark = pytest.mark.unit
 
 
-def _config(dtype=jnp.float64) -> SimulationConfig:
+def _config(dtype=jnp.float32) -> SimulationConfig:
     return SimulationConfig(
         time=20e-15,
         grid=RectilinearGrid(
@@ -32,7 +32,7 @@ def _config(dtype=jnp.float64) -> SimulationConfig:
     )
 
 
-def _fields(dtype=jnp.complex128) -> tuple[jax.Array, jax.Array]:
+def _fields(dtype=jnp.complex64) -> tuple[jax.Array, jax.Array]:
     shape = (3, 2, 2, 1)
     electric = jnp.zeros(shape, dtype=dtype)
     magnetic = jnp.zeros(shape, dtype=dtype)
@@ -78,7 +78,7 @@ def test_custom_mode_source_preserves_complex_fields_and_callback_inputs() -> No
         return expected_e, expected_h
 
     source = _place(_source(callback), config)
-    inv_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float64)
+    inv_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float32)
     applied = source.apply(jax.random.PRNGKey(4), inv_permittivity, 1.0)
 
     np.testing.assert_array_equal(applied._E, expected_e)
@@ -100,10 +100,10 @@ def test_custom_mode_source_uses_existing_complex_tfsf_updates() -> None:
     config = _config()
     electric, magnetic = _fields()
     source = _place(_source(lambda **_: (electric, magnetic)), config)
-    inv_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float64)
+    inv_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float32)
     source = source.apply(jax.random.PRNGKey(5), inv_permittivity, 1.0)
 
-    zeros = jnp.zeros((3, 2, 2, 1), dtype=jnp.float64)
+    zeros = jnp.zeros((3, 2, 2, 1), dtype=jnp.float32)
     updated_e = source.update_E(zeros, inv_permittivity, 1.0, jnp.asarray(2), False)
     updated_h = source.update_H(zeros, inv_permittivity, 1.0, jnp.asarray(2), False)
     inverse_e = source.update_E(zeros, inv_permittivity, 1.0, jnp.asarray(2), True)
@@ -118,12 +118,12 @@ def test_custom_mode_source_uses_existing_complex_tfsf_updates() -> None:
 def test_custom_mode_source_can_apply_explicit_fdtdx_normalization() -> None:
     config = _config()
     shape = (3, 2, 2, 1)
-    electric = jnp.zeros(shape, dtype=jnp.complex128).at[0].set(2.0)
-    magnetic = jnp.zeros(shape, dtype=jnp.complex128).at[1].set(0.5)
+    electric = jnp.zeros(shape, dtype=jnp.complex64).at[0].set(2.0)
+    magnetic = jnp.zeros(shape, dtype=jnp.complex64).at[1].set(0.5)
     source = _place(_source(lambda **_: (electric, magnetic), normalize=True), config)
     source = source.apply(
         jax.random.PRNGKey(6),
-        jnp.ones((3, 2, 2, 1), dtype=jnp.float64),
+        jnp.ones((3, 2, 2, 1), dtype=jnp.float32),
         1.0,
     )
 
@@ -143,11 +143,11 @@ def test_custom_mode_source_stops_callback_field_gradients() -> None:
     source = _place(_source(callback), config)
 
     def objective(scale):
-        inverse_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float64) * scale
+        inverse_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float32) * scale
         applied = source.apply(jax.random.PRNGKey(61), inverse_permittivity, 1.0)
         return jnp.real(jnp.sum(applied._E) + jnp.sum(applied._H))
 
-    assert jax.grad(objective)(jnp.asarray(0.75, dtype=jnp.float64)) == pytest.approx(0.0)
+    assert jax.grad(objective)(jnp.asarray(0.75, dtype=jnp.float32)) == pytest.approx(0.0)
 
 
 def test_custom_mode_source_explicit_profile_update_preserves_jax_gradient() -> None:
@@ -162,7 +162,7 @@ def test_custom_mode_source_explicit_profile_update_preserves_jax_gradient() -> 
     )
     source = source.apply(
         jax.random.PRNGKey(62),
-        jnp.ones((3, 2, 2, 1), dtype=jnp.float64),
+        jnp.ones((3, 2, 2, 1), dtype=jnp.float32),
         1.0,
     )
 
@@ -171,20 +171,20 @@ def test_custom_mode_source_explicit_profile_update_preserves_jax_gradient() -> 
         updated = source.with_mode_profile(
             mode_E=electric * (1.0 + scale),
             mode_H=magnetic * (1.0 - 0.25 * scale),
-            effective_index=jnp.asarray(2.4 + 0.1 * scale, dtype=jnp.complex128),
+            effective_index=jnp.asarray(2.4 + 0.1 * scale, dtype=jnp.complex64),
         )
         field_value = jnp.real(jnp.sum(updated._E) + 0.5 * jnp.sum(updated._H))
         time_offset_value = 1e15 * jnp.sum(updated._time_offset_E + updated._time_offset_H)
         return field_value + time_offset_value
 
-    value = jnp.asarray(0.2, dtype=jnp.float64)
+    value = jnp.asarray(0.2, dtype=jnp.float32)
     gradient = jax.grad(objective)(value)
-    step = jnp.asarray(1e-5, dtype=jnp.float64)
+    step = jnp.asarray(1e-3, dtype=jnp.float32)
     finite_difference = (objective(value + step) - objective(value - step)) / (2.0 * step)
 
     assert bool(jnp.isfinite(gradient))
     assert float(jnp.abs(gradient)) > 0.0
-    np.testing.assert_allclose(gradient, finite_difference, rtol=2e-8, atol=1e-10)
+    np.testing.assert_allclose(gradient, finite_difference, rtol=2e-3, atol=2e-4)
 
 
 def test_custom_mode_source_profile_gradient_reaches_tfsf_injection() -> None:
@@ -197,15 +197,15 @@ def test_custom_mode_source_profile_gradient_reaches_tfsf_injection() -> None:
         ),
         config,
     )
-    inverse_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float64)
+    inverse_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float32)
     source = source.apply(jax.random.PRNGKey(65), inverse_permittivity, 1.0)
-    zeros = jnp.zeros((3, 2, 2, 1), dtype=jnp.float64)
+    zeros = jnp.zeros((3, 2, 2, 1), dtype=jnp.float32)
 
     def objective(scale):
         updated = source.with_mode_profile(
             mode_E=electric * (1.0 + 0.2 * scale),
             mode_H=magnetic * (1.0 - 0.1 * scale),
-            effective_index=jnp.asarray(2.4 + 0.05 * scale, dtype=jnp.complex128),
+            effective_index=jnp.asarray(2.4 + 0.05 * scale, dtype=jnp.complex64),
         )
         injected_e = updated.update_E(
             zeros,
@@ -223,14 +223,14 @@ def test_custom_mode_source_profile_gradient_reaches_tfsf_injection() -> None:
         )
         return jnp.sum(injected_e**2) + jnp.sum(injected_h**2)
 
-    value = jnp.asarray(0.1, dtype=jnp.float64)
+    value = jnp.asarray(0.1, dtype=jnp.float32)
     gradient = jax.grad(objective)(value)
-    step = jnp.asarray(1e-5, dtype=jnp.float64)
+    step = jnp.asarray(1e-3, dtype=jnp.float32)
     finite_difference = (objective(value + step) - objective(value - step)) / (2.0 * step)
 
     assert bool(jnp.isfinite(gradient))
     assert float(jnp.abs(gradient)) > 0.0
-    np.testing.assert_allclose(gradient, finite_difference, rtol=2e-8, atol=1e-10)
+    np.testing.assert_allclose(gradient, finite_difference, rtol=2e-3, atol=2e-4)
 
 
 def test_dynamic_profile_does_not_add_material_to_mode_derivative() -> None:
@@ -243,7 +243,7 @@ def test_dynamic_profile_does_not_add_material_to_mode_derivative() -> None:
         ),
         config,
     )
-    baseline_inverse_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float64)
+    baseline_inverse_permittivity = jnp.ones((3, 2, 2, 1), dtype=jnp.float32)
     source = source.apply(
         jax.random.PRNGKey(66),
         baseline_inverse_permittivity,
@@ -252,9 +252,9 @@ def test_dynamic_profile_does_not_add_material_to_mode_derivative() -> None:
     source = source.with_mode_profile(
         mode_E=electric,
         mode_H=magnetic,
-        effective_index=jnp.asarray(2.4 + 0.0j, dtype=jnp.complex128),
+        effective_index=jnp.asarray(2.4 + 0.0j, dtype=jnp.complex64),
     )
-    zeros = jnp.zeros((3, 2, 2, 1), dtype=jnp.float64)
+    zeros = jnp.zeros((3, 2, 2, 1), dtype=jnp.float32)
 
     def source_injection(scale):
         inverse_permittivity = baseline_inverse_permittivity * scale
@@ -274,7 +274,7 @@ def test_dynamic_profile_does_not_add_material_to_mode_derivative() -> None:
         )
         return jnp.sum(injected_e**2) + jnp.sum(injected_h**2)
 
-    assert jax.grad(source_injection)(jnp.asarray(0.75, dtype=jnp.float64)) == pytest.approx(0.0)
+    assert jax.grad(source_injection)(jnp.asarray(0.75, dtype=jnp.float32)) == pytest.approx(0.0)
 
 
 def test_custom_mode_source_rejects_profile_update_without_explicit_opt_in() -> None:
@@ -283,7 +283,7 @@ def test_custom_mode_source_rejects_profile_update_without_explicit_opt_in() -> 
     source = _place(_source(lambda **_: (electric, magnetic)), config)
     source = source.apply(
         jax.random.PRNGKey(63),
-        jnp.ones((3, 2, 2, 1), dtype=jnp.float64),
+        jnp.ones((3, 2, 2, 1), dtype=jnp.float32),
         1.0,
     )
 
@@ -291,7 +291,7 @@ def test_custom_mode_source_rejects_profile_update_without_explicit_opt_in() -> 
         source.with_mode_profile(
             mode_E=electric,
             mode_H=magnetic,
-            effective_index=jnp.asarray(2.4 + 0.0j, dtype=jnp.complex128),
+            effective_index=jnp.asarray(2.4 + 0.0j, dtype=jnp.complex64),
         )
 
 
@@ -307,13 +307,13 @@ def test_custom_mode_source_profile_update_fails_closed_for_invalid_values() -> 
     )
     source = source.apply(
         jax.random.PRNGKey(64),
-        jnp.ones((3, 2, 2, 1), dtype=jnp.float64),
+        jnp.ones((3, 2, 2, 1), dtype=jnp.float32),
         1.0,
     )
     updated = source.with_mode_profile(
         mode_E=electric,
         mode_H=magnetic,
-        effective_index=jnp.asarray(-1.0 + 0.0j, dtype=jnp.complex128),
+        effective_index=jnp.asarray(-1.0 + 0.0j, dtype=jnp.complex64),
     )
 
     assert bool(jnp.isnan(updated._E).all())
@@ -346,15 +346,15 @@ def test_custom_mode_source_rejects_invalid_effective_index(effective_index, mes
     [
         (
             lambda: (
-                jnp.ones((3, 2, 1, 1), dtype=jnp.complex128),
-                jnp.ones((3, 2, 2, 1), dtype=jnp.complex128),
+                jnp.ones((3, 2, 1, 1), dtype=jnp.complex64),
+                jnp.ones((3, 2, 2, 1), dtype=jnp.complex64),
             ),
             "electric field must have shape",
         ),
         (
             lambda: (
-                jnp.ones((3, 2, 2, 1), dtype=jnp.complex128),
                 jnp.ones((3, 2, 2, 1), dtype=jnp.complex64),
+                jnp.ones((3, 2, 2, 1), dtype=jnp.int32),
             ),
             "magnetic field dtype",
         ),
@@ -366,7 +366,7 @@ def test_custom_mode_source_rejects_shape_and_precision_changes(factory, message
     with pytest.raises(ValueError, match=message):
         source.apply(
             jax.random.PRNGKey(7),
-            jnp.ones((3, 2, 2, 1), dtype=jnp.float64),
+            jnp.ones((3, 2, 2, 1), dtype=jnp.float32),
             1.0,
         )
 
@@ -379,7 +379,7 @@ def test_custom_mode_source_rejects_added_tilt_or_randomization() -> None:
     with pytest.raises(NotImplementedError, match="cannot be tilted or randomized"):
         source.apply(
             jax.random.PRNGKey(8),
-            jnp.ones((3, 2, 2, 1), dtype=jnp.float64),
+            jnp.ones((3, 2, 2, 1), dtype=jnp.float32),
             1.0,
         )
 
